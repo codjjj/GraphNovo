@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*- 
 import os
 import sys
 import gzip
@@ -10,19 +9,8 @@ from glob import glob
 from BasicClass import Residual_seq, Ion
 from itertools import combinations_with_replacement
 from edge_matrix_gen import edge_matrix_generator, typological_sort_floyd_warshall, gen_edge_input
+from graph_constructor import GraphGenerator
 
-
-os.chdir(sys.path[0]) 
-
-all_edge_mass = []
-aalist = Residual_seq.output_aalist()
-for num in range(1,7):
-    for i in combinations_with_replacement(aalist,num):
-        all_edge_mass.append(Residual_seq(i).mass)
-all_edge_mass = np.unique(np.array(all_edge_mass))
-
-with open('candidate_mass','rb') as f:
-    candidate_mass = pickle.load(f)
 
 def read_mgf(file_path):
     raw_mgf_blocks = {}
@@ -42,6 +30,15 @@ def read_mgf(file_path):
                     raw_mgf_blocks[file_name] = {'product_ions_moverz':np.array(product_ions_moverz),
                                                  'product_ions_intensity':np.array(product_ions_intensity)}
     return raw_mgf_blocks
+
+worker, total_worker, file_path, csv_filename = 1, 1, '/ailab/user/dingjian/gnovo/GraphNovo/validation_dataset/mgf/', 'test_dataset'
+psm_head = pd.read_csv(os.path.join(file_path,f'{csv_filename}.csv'), index_col='Spec Index')
+spectra_per_worker = int(len(psm_head)/total_worker)
+start_i, end_i = spectra_per_worker*(worker-1), spectra_per_worker*worker
+psm_head = psm_head.iloc[start_i:end_i]
+
+all_spectra = read_mgf(file_path)
+
 
 class PeakFeatureGeneration:
     def __init__(self, local_sliding_window, data_acquisition_upper_limit):
@@ -140,21 +137,39 @@ class GraphGenerator:
         self.c_term_ion_list = ['1y','1y-NH3','1y-H2O','2y','2y-NH3','2y-H2O']
         
     def __call__(self, seq, product_ions_moverz, product_ions_intensity, precursor_ion_mass, muti_charged):
+        """_summary_
+
+        Args:
+            seq: _description_
+            product_ions_moverz: _description_
+            product_ions_intensity: _description_
+            precursor_ion_mass: _description_
+            muti_charged: bool check if charge>2
+
+        Returns:
+            _description_
+        """        
+
         #Please Read GraphNovo Paper Fig1b Step1
+        #peak_feature (peak.no.,8)
         peak_feature = self.peak_feature_generation(product_ions_moverz, product_ions_intensity)
 
         #Please Read GraphNovo Paper Fig1b Step2
         subnode_mass, subnode_feature = self.candidate_subgraph_generator(precursor_ion_mass, product_ions_moverz, peak_feature)
         
         #Please Read GraphNovo Paper Fig1b Step3
+        # node_mass (filtered.no.+2)
         node_mass = self.graphnode_mass_generator(precursor_ion_mass, product_ions_moverz, muti_charged)
         #assert node_mass.size<=512
 
         #Please Read GraphNovo Paper Fig1b Step4
+        # node_feat (filtered.no.,max_nb,8+1+2-1) node_sourceion (filtered.no.,max_nb) 
         node_feat, node_sourceion = self.graphnode_feature_generator(node_mass, subnode_mass, subnode_feature, precursor_ion_mass)
 
         #Please Read GraphNovo Paper Fig1b Step5
         subedge_maxnum, edge_type, edge_error = self.edge_generator(node_mass,precursor_ion_mass)
+        # TODO: rel_pos? rel_pos=rel_coor[-2]
+        # rel longest path(no weight graph)
         rel_type, rel_error, dist, rel_pos, rel_coor = self.multihop_rel_generator(subedge_maxnum, edge_type, edge_error)
 
         #Lable optimul path generation.
@@ -163,16 +178,21 @@ class GraphGenerator:
         edge_type = edge_type[mask].reshape((-1,1))
         edge_error = edge_error[mask].reshape((-1,1))
         edge_coor = np.array(np.where(mask)).T
-        
+        # node_feature: node,neighbour,node_mass+neigbour_feature(delete position)+mass_diff
+        # node_sourceion: node,neighbour -> ion type(18)
         node_input = {'node_feat': torch.Tensor(node_feat),
                       'node_sourceion': torch.IntTensor(node_sourceion)}
-        
+        # rel_type rel_error: flatten tensor(node,node,path_length,edge_type)
+        # dist longest path distance(node,node)
+        # rel_pos rel_pos=rel_coor[-2]
+        # rel_coor initial coordinates of flattened tensor (flattened_length,4)
         rel_input = {'rel_type': torch.IntTensor(rel_type),
                      'rel_error': torch.Tensor(rel_error),
                      'dist': torch.IntTensor(dist),
                      'rel_pos': torch.IntTensor(rel_pos),
                      'rel_coor': torch.LongTensor(rel_coor)}
-        
+        # edge_type edge_error: flatten tensor(node,node,edge_type)
+        # edge_coor initial coordinates of flattened tensor
         edge_input = {'edge_type': torch.IntTensor(edge_type),
                       'edge_error': torch.Tensor(edge_error),
                       'edge_coor': torch.LongTensor(edge_coor)}
@@ -190,21 +210,27 @@ class GraphGenerator:
             product_ions_feature: array[peak.no.,8]
 
         Returns:
-            _description_
+            candidate_subgraphnode_moverz(peak.no.+2), candidate_subgraphnode_feature(peak.no.+2,9)
         """        
+        
+        # candidate_subgraphnode_moverz  list(sz.18) of array[peak.no] 
+        # after concat array[18peak.no]
         candidate_subgraphnode_moverz = []
         candidate_subgraphnode_moverz += [Ion.peak2sequencemz(product_ions_moverz,ion) for ion in self.n_term_ion_list]
         candidate_subgraphnode_moverz += [precursor_ion_mass-Ion.peak2sequencemz(product_ions_moverz,ion) for ion in self.c_term_ion_list]
         candidate_subgraphnode_moverz = np.concatenate(candidate_subgraphnode_moverz)
+
         candidate_subgraphnode_feature = []
-        for i in range(2,len(self.n_term_ion_list)+len(self.c_term_ion_list)+2):
+        for i in range(2,len(self.n_term_ion_list)+len(self.c_term_ion_list)+2):# 2 20
             candidate_subgraphnode_source = i*np.ones([product_ions_moverz.size, 1])
             candidate_subgraphnode_feature.append(np.concatenate((product_ions_feature,candidate_subgraphnode_source),axis=1))
+        # candidate_subgraphnode_feature (18peak.no,8+1)
         candidate_subgraphnode_feature = np.concatenate(candidate_subgraphnode_feature)
-        
+        # add start and end sign (start is 0,end is precursor residue mass)
         candidate_subgraphnode_moverz = np.insert(candidate_subgraphnode_moverz,
                                                   [0,candidate_subgraphnode_moverz.size],
                                                   [0,precursor_ion_mass])
+        # sort m/z
         sorted_index = np.argsort(candidate_subgraphnode_moverz)
         candidate_subgraphnode_moverz = candidate_subgraphnode_moverz[sorted_index]
         
@@ -212,6 +238,7 @@ class GraphGenerator:
                                                          candidate_subgraphnode_feature,
                                                          np.array([1]*9).reshape(1,-1)],axis=0)
         candidate_subgraphnode_feature = candidate_subgraphnode_feature[sorted_index]
+        print(candidate_subgraphnode_moverz.shape,candidate_subgraphnode_feature.shape)
         return candidate_subgraphnode_moverz, candidate_subgraphnode_feature
 
     def record_filter(self, mass_list, precursor_ion_mass=None):
@@ -225,7 +252,19 @@ class GraphGenerator:
         return mass_list[mask], mask
 
     def graphnode_mass_generator(self, precursor_ion_mass, product_ions_moverz, muti_charged):
-        #1a ion
+        """_summary_
+
+        Args:
+            precursor_ion_mass: float
+            product_ions_moverz: (peak.no)
+            muti_charged: charge>2
+
+        Returns:
+            graphnode_mass (filtered mass + 2)
+            for the peak m/z within some candidate_mass ,keep
+            for over the max and less than the precursor, keep
+        """        
+        #1a ion ,check the prefix and suffix match the condition in the tolorance range or exceed 1000Da 
         node_1a_mass_nterm, _ = self.record_filter(Ion.peak2sequencemz(product_ions_moverz[product_ions_moverz<250],'1a'))
         _, mask = self.record_filter(precursor_ion_mass-node_1a_mass_nterm,precursor_ion_mass)
         node_1a_mass_nterm = node_1a_mass_nterm[mask]
@@ -262,11 +301,14 @@ class GraphGenerator:
             mass_merge_feat = np.concatenate([np.exp(-graphnode_mass[i]*np.ones((higher_bound-lower_bound,1))/self.data_acquisition_upper_limit),
                                               subnode_feature[np.arange(lower_bound,higher_bound)],
                                               mass_merge_error.reshape(-1,1)],axis=1)
+            # sort by mass_merge_error
             mass_merge_feat = mass_merge_feat[mass_merge_index]
             mass_merge_feat = np.pad(mass_merge_feat,((0,subnode_maxnum-(higher_bound-lower_bound)),(0,0)))
             node_feature.append(mass_merge_feat)
         node_feature = np.stack(node_feature)
+        # 不知道为什么不是 node_feature[0,:,:]=0
         node_feature[0,1:,:]=0
+        # id, repr. type of ion
         node_sourceion = node_feature[:,:,-2]
         node_feat = np.delete(node_feature,-2,axis=2)
         return node_feat, node_sourceion
@@ -325,39 +367,40 @@ class GraphGenerator:
         for i, (lower_bound, higher_bound) in enumerate(zip(start_index, end_index)):
             graph_label[:,i][lower_bound:higher_bound] = 1
         return graph_label
+    
+with open(os.path.join(file_path,f'{csv_filename}_{worker}.csv'), 'w') as index_writer:
+    index_writer.write('Spec Index,Annotated Sequence,Charge,m/z,Node Number,Relation Num,Edge Num,MSGP File Name,MSGP Datablock Pointer,MSGP Datablock Length\n')
+    for i, (spec_index, (seq, precursor_charge, precursor_moverz)) in enumerate(psm_head[['Annotated Sequence','Charge','m/z']].iterrows()):
+        file_num = i//4000
+        if i%4000==0:
+            try: writer.close()
+            except: pass 
+            writer = open(os.path.join(file_path,f'{csv_filename}_{worker}_{file_num}.msgp'),'wb')
+        # replace L to I
+        seq = seq.replace('L','I').replace(' ','')
+        ion_info = all_spectra[spec_index]
+        precursor_ion_mass = Ion.precursorion2mass(precursor_moverz, precursor_charge)
+        product_ions_moverz, product_ions_intensity = ion_info['product_ions_moverz'], ion_info['product_ions_intensity']
 
-graph_gen = GraphGenerator(candidate_mass,all_edge_mass)
+        #candidate mass and all_edge_mass
+        all_edge_mass = []
+        aalist = Residual_seq.output_aalist()
+        for num in range(1,2):
+            for i in combinations_with_replacement(aalist,num):
+                all_edge_mass.append(Residual_seq(i).mass)
+        all_edge_mass = np.unique(np.array(all_edge_mass))
 
-if __name__=='__main__':
-    worker, total_worker, file_path, csv_filename = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
-    psm_head = pd.read_csv(os.path.join(file_path,f'{csv_filename}.csv'), index_col='Spec Index')
-    spectra_per_worker = int(len(psm_head)/total_worker)
-    start_i, end_i = spectra_per_worker*(worker-1), spectra_per_worker*worker
-    psm_head = psm_head.iloc[start_i:end_i]
-    # all_spectra mgf_title->(m/z,int)
-    all_spectra = read_mgf(file_path)
-    print("START")
-    with open(os.path.join(file_path,f'{csv_filename}_{worker}.csv'), 'w') as index_writer:
-        index_writer.write('Spec Index,Annotated Sequence,Charge,m/z,Node Number,Relation Num,Edge Num,MSGP File Name,MSGP Datablock Pointer,MSGP Datablock Length\n')
-        for i, (spec_index, (seq, precursor_charge, precursor_moverz)) in enumerate(psm_head[['Annotated Sequence','Charge','m/z']].iterrows()):
-            file_num = i//4000
-            if i%4000==0:
-                try: writer.close()
-                except: pass 
-                writer = open(os.path.join(file_path,f'{csv_filename}_{worker}_{file_num}.msgp'),'wb')
-            # remove L I ???
-            seq = seq.replace('L','I').replace(' ','')
-            product_ion_info = all_spectra[spec_index]
-            precursor_ion_mass = Ion.precursorion2mass(precursor_moverz, precursor_charge)
-            product_ions_moverz, product_ions_intensity = product_ion_info['product_ions_moverz'], product_ion_info['product_ions_intensity']
-            node_mass, node_input, rel_input, edge_input, graph_label = graph_gen(seq, product_ions_moverz, product_ions_intensity, precursor_ion_mass, precursor_charge>2)
-            record = {'node_mass':node_mass,
-                      'node_input':node_input, 
-                      'rel_input':rel_input, 
-                      'edge_input':edge_input, 
-                      'graph_label':graph_label}
-            compressed_data = gzip.compress(pickle.dumps(record))
-            index_writer.write('{},{},{},{},{},{},{},{},{},{}\n'.format(spec_index,seq,precursor_charge,precursor_moverz,node_mass.size,len(rel_input['rel_type']),len(edge_input['edge_type']),"{}_{}_{}.msgp".format(csv_filename, worker, file_num),writer.tell(),len(compressed_data)))
-            writer.write(compressed_data)
-    print("FINISH GRAPH CONSTRUCTION!!!")
-                
+        with open('candidate_mass','rb') as f:
+            candidate_mass = pickle.load(f)
+
+
+        graph_gen = GraphGenerator(candidate_mass,all_edge_mass)
+        node_mass, node_input, rel_input, edge_input, graph_label = graph_gen(seq, product_ions_moverz, product_ions_intensity, precursor_ion_mass, precursor_charge>2)
+        record = {'node_mass':node_mass,
+                    'node_input':node_input, 
+                    'rel_input':rel_input, 
+                    'edge_input':edge_input, 
+                    'graph_label':graph_label}
+        compressed_data = gzip.compress(pickle.dumps(record))
+        index_writer.write('{},{},{},{},{},{},{},{},{},{}\n'.format(spec_index,seq,precursor_charge,precursor_moverz,node_mass.size,len(rel_input['rel_type']),len(edge_input['edge_type']),"{}_{}_{}.msgp".format(csv_filename, worker, file_num),writer.tell(),len(compressed_data)))
+        writer.write(compressed_data)

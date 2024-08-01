@@ -224,7 +224,7 @@ class Ion():
         'y-H2O': Composition('H') + Composition('-H2O'),
         #'z': Composition('-NH2')
     }
-
+    # from b-residue(m/z) to ion
     __term_ion_offset = {
         'a': Composition('-CHO') + Composition('H'),
         'a-NH3': Composition('-CHO') + Composition('-NH3') + Composition('H'),

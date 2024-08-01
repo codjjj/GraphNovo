@@ -11,17 +11,21 @@ from omegaconf import DictConfig, OmegaConf
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig)->None:
     if cfg.mode == 'train':
+        # read train csv
         train_spec_header = pd.read_csv(cfg.train_spec_header_path,index_col='Spec Index')
+        # read eval csv
         eval_spec_header = pd.read_csv(cfg.eval_spec_header_path,index_col='Spec Index')
+        # init task(model_path,dist)
         task = genova.task.Task(cfg,serialized_model_path=cfg.serialized_model_path, distributed=cfg.dist)
+        # initialize(train_header,train_dir(graph file form),val_header,val_dir)
+        # init model, dl, train_loss(task-wise) , ddp, opt, scaler,ckpt
         task.initialize(train_spec_header=train_spec_header,train_dataset_dir=cfg.train_dataset_dir,val_spec_header=eval_spec_header,val_dataset_dir=cfg.eval_dataset_dir)
         
         if dist.is_initialized() and dist.get_rank()!=0: pass
         else:
-            run = wandb.init(entity=cfg.wandb.entity, 
-                            project=cfg.wandb.project, name=cfg.wandb.name, 
+            run = wandb.init(project=cfg.wandb.project, name=cfg.wandb.name, 
                             config=OmegaConf.to_container(cfg))
-            wandb.watch(task.model, criterion=task.eval_loss_fn, log='all', log_freq=cfg.train.eval_period*cfg.train.detect_period, log_graph=True)
+            wandb.watch(task.model, criterion=task.eval_loss_fn, log='all', log_freq=cfg.train.eval_period*cfg.train.detect_period, log_graph=False)
         best_loss = float('inf')
         if cfg.task =='node_classification':
             for loss_train, total_step, epoch in task.train():

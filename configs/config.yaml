@@ -16,7 +16,6 @@ eval_dataset_dir: None
 serialized_model_path: None
 
 wandb:
-  entity: graphnovo
   project: Graphnovo
   name: pathsearcer
 

@@ -1,0 +1,10 @@
+/test_dataset
+/training_dataset
+/validation_dataset
+/wandb
+*.pyc
+slurm*.out
+tmux*
+/.vscode
+/save
+/outputs

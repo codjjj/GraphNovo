@@ -10,6 +10,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from .optimal_path_inference import optimal_path_infer
 from .seq_generation_inference import seq_generation_infer
 
+
+
 class Task:
     def __init__(self, cfg, serialized_model_path, distributed=True):
         self.cfg = cfg
@@ -48,6 +50,7 @@ class Task:
         if self.distributed: self.model = DDP(self.model, device_ids=[self.local_rank], output_device=self.local_rank)
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.cfg.train.lr)
         self.scaler = GradScaler()
+        # PathSearcher
         self.persistent_file_name = os.path.join(self.serialized_model_path,self.cfg.wandb.project+'_'+self.cfg.wandb.name+'.pt')
         if os.path.exists(self.persistent_file_name):
             checkpoint = torch.load(self.persistent_file_name)
